@@ -1,0 +1,19 @@
+{
+  "name": "Chompybot",
+  "description": "An add-on that makes suggestions for lunch",
+  "key": "io.weiss.chompybot",
+  "links": {
+    "homepage": "https://example.com/myaddon",
+    "self": "https://example.com/myaddon/capabilities"
+  },
+  "capabilities": {
+    "hipchatApiConsumer": {
+      "scopes": [
+        "send_notification"
+      ]
+    }
+    "installable": {
+      "callbackUrl": "https://example.com/myaddon/installable"
+	}
+  }
+}
