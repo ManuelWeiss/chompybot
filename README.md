@@ -1,0 +1,4 @@
+chompybot
+=========
+
+Hipchat addon
