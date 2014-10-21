@@ -3,44 +3,45 @@ package controllers
 import play.api.mvc.{ Action, Controller }
 import play.api.Logger
 import play.api.libs.json.Json
-import play.api.libs.ws.WS
-
+import play.api.libs.ws._
+import com.ning.http.client.Realm.AuthScheme
+import play.api.libs.concurrent.Execution.Implicits._
+import scala.concurrent.Future
+import scala.util.{ Success, Failure }
 
 object Application extends Controller {
 
     val URL = "https://dry-sierra-3468.herokuapp.com/"
+    val user = "e16e91ae-bf8e-4cc4-a52d-c08cdf497efc"
+    val pass = "kzZImKPmbGeWyCadw7MD1VsBPSSAEG05NS5YH0om"
+    val roomId = 546167
+
+    implicit val context = scala.concurrent.ExecutionContext.Implicits.global
 
     def index = Action {
         Ok(views.html.index("Hello Play Framework"))
     }
 
     def capabilities = Action {
-        Ok("""
-    {
-  "name": "Chompybot",
-  "description": "An add-on that makes suggestions for lunch",
-  "key": "io.weiss.chompybot",
-  "links": {
-    "homepage": "https://dry-sierra-3468.herokuapp.com/",
-    "self": "https://dry-sierra-3468.herokuapp.com/capabilities"
-  },
-  "capabilities": {
-    "hipchatApiConsumer": {
-      "scopes": [
-        "send_notification"
-      ]
-    },
-    "installable": {
-      "callbackUrl": "https://dry-sierra-3468.herokuapp.com/installable"
-    },
-    "webhook": [{
-        "url": "https://dry-sierra-3468.herokuapp.com/message",
-        "event": "room_message",
-        "name": "messages"
-    }]
-  }
-    }
-    """)
+        val caps = Json.obj(
+            "name" -> "Chompybot",
+            "description" -> "An add-on that makes suggestions for lunch",
+            "key" -> "io.weiss.chompybot",
+            "links" -> Json.obj(
+                "homepage" -> URL,
+                "self" -> s"$URL/capabilities"),
+            "capabilities" -> Json.obj(
+                "hipchatApiConsumer" -> Json.obj(
+                    "scopes" -> Json.arr(
+                        "send_notification",
+                        "send_message")),
+                "installable" -> Json.obj(
+                    "callbackUrl" -> s"$URL/installable"),
+                "webhook" -> Json.arr(Json.obj(
+                    "url" -> s"$URL/message",
+                    "event" -> "room_message",
+                    "name" -> "messages"))))
+        Ok(caps)
     }
 
     // receives POST
@@ -57,20 +58,84 @@ object Application extends Controller {
     // receives POST
     def receive_message = Action(parse.json) {
         request =>
-            {
-                val json = request.body
-                Logger.debug(Json.prettyPrint(json))
-                Ok("success")
+            (request.body \ "item" \ "message" \ "message").asOpt[String].map { message =>
+                {
+                    Logger.debug(s"got message: $message")
+                    val response = send_message(s"""did you just say "$message"?""")
+                    response.onComplete {
+                        case Success(body) => Logger.debug(s"response to send request: $body")
+                        case Failure(t) => Logger.debug("failure: " + t.getMessage)
+                    }
+                    Ok("success")
+                }
+            }.getOrElse {
+                val error = "No 'message' in " + request.body
+                Logger.debug(error)
+                BadRequest(error)
             }
     }
 
-//    def send_message(message: String) = Action {
-//        Async {
-//            val messageURL = "http://"
-//            WS.url(messageURL).get().map { response =>
-//                Ok("Feed title: " + (response.json \ "title").as[String])
-//            }
-//        }
-//    }
+    def get_token(user: String, pass: String): Future[Option[String]] = {
+        val tokenURL = "https://api.hipchat.com/v2/oauth/token"
+        WS.url(tokenURL)
+            .withAuth(user, pass, AuthScheme.BASIC)
+            .post(Map(
+                "grant_type" -> Seq("client_credentials"),
+                "scope" -> Seq("send_notification")))
+            .map {
+                case (response) =>
+                    if (response.status == 200)
+                        Some((response.json \ "access_token").as[String])
+                    else {
+                        Logger.debug("couldn't get auth token: " + response.body)
+                        None
+                    }
+            }
+    }
 
+    def messagetest = Action {
+        val r = send_message("This is a test")
+        r.onComplete {
+            case Success(body) => Logger.debug(s"response to send request: $body")
+            case Failure(t) => Logger.debug("failure: " + t.getMessage)
+        }
+        Ok("success")
+    }
+
+    def send_message(message: String): Future[String] = {
+        for {
+            token <- get_token(user, pass)
+            response <- send_message_with_token(message, token.get) if (token.isDefined)
+        } yield response
+    }
+
+    def send_message_with_token(message: String, token: String): Future[String] = {
+        val messageURL = s"https://api.hipchat.com/v2/room/$roomId/notification"
+        WS.url(messageURL)
+            .withHeaders("content-type" -> "application/json")
+            .withQueryString("auth_token" -> token)
+            .post(Json.obj("message" -> message))
+            .map {
+                case (response) =>
+                    if (response.status == 200)
+                        "Success"
+                    else
+                        "send_message failed: " + response.body
+            }
+    }
+
+    //{
+    //  "oauthId" : "8534e74b-8b8d-4270-812d-73bff87e5d28",
+    //  "capabilitiesUrl" : "https://api.hipchat.com/v2/capabilities",
+    //  "roomId" : 546167,
+    //  "groupId" : 35222,
+    //  "oauthSecret" : "IAuNDb5Tu2tp9BYmA12hQ53wdqtRCim4mnFQx7IJ"
+    //}
+
+    // get token:
+    //  curl  -X POST -d "grant_type=client_credentials&scope=send_notification" -u "8534e74b-8b8d-4270-812d-73bff87e5d28:IAuNDb5Tu2tp9BYmA12hQ53wdqtRCim4mnFQx7IJ" https://api.hipchat.com/v2/oauth/token
+    // {"access_token": "F7hTDT3sqQPuGKP4HSOIRadv4Fko0qNVAhgARFFj", "expires_in": 3599, "group_id": 35222, "group_name": "Moonfruit", "scope": "send_notification", "token_type": "bearer"}
+
+    // send message:
+    //  curl -X POST -H "content-type: application/json" -d '{"message":"Hello Hipchat!"}' https://api.hipchat.com/v2/room/546167/notification?auth_token=XioEg4li1eScCtPMKklSoGZhReHgxhjuctJJNvp8
 }
