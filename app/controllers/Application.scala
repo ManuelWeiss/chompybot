@@ -8,6 +8,9 @@ import com.ning.http.client.Realm.AuthScheme
 import play.api.libs.concurrent.Execution.Implicits._
 import scala.concurrent.Future
 import scala.util.{ Success, Failure }
+import play.api.cache.Cache
+import play.api.Play.current
+import com.github.nscala_time.time.Imports._
 
 object Application extends Controller {
 
@@ -75,7 +78,34 @@ object Application extends Controller {
             }
     }
 
-    def get_token(user: String, pass: String): Future[Option[String]] = {
+    type DT = org.joda.time.DateTime
+    case class Token(token: String, expiryDate: DT)
+
+    def get_token(): Future[Option[String]] = {
+        Cache.getAs[Token]("authToken") match {
+            case Some(cachedToken) => {
+                if (cachedToken.expiryDate < DateTime.now + 5.seconds)
+                    refresh_cached_token
+                else
+                    Future.successful(Some(cachedToken.token))
+            }
+            case None => refresh_cached_token
+        }
+    }
+
+    def refresh_cached_token: Future[Option[String]] = {
+        val futureToken = fetch_token(user, pass)
+        futureToken.onComplete {
+            case Success(token) => Cache.set("authToken", token)
+            case Failure(t) => Logger.debug(s"retrieving auth token failed: $t")
+        }
+        futureToken.map {
+            case Some(t) => Some(t.token)
+            case None => None
+        }
+    }
+
+    def fetch_token(user: String, pass: String): Future[Option[Token]] = {
         val tokenURL = "https://api.hipchat.com/v2/oauth/token"
         WS.url(tokenURL)
             .withAuth(user, pass, AuthScheme.BASIC)
@@ -84,8 +114,12 @@ object Application extends Controller {
                 "scope" -> Seq("send_notification")))
             .map {
                 case (response) =>
-                    if (response.status == 200)
-                        Some((response.json \ "access_token").as[String])
+                    if (response.status == 200) {
+                        val token = (response.json \ "access_token").as[String]
+                        val expiresIn = (response.json \ "expires_in").as[Int]
+                        val validUntil = DateTime.now + expiresIn
+                        Some(Token(token, validUntil))
+                    }
                     else {
                         Logger.debug("couldn't get auth token: " + response.body)
                         None
@@ -104,7 +138,7 @@ object Application extends Controller {
 
     def send_message(message: String): Future[String] = {
         for {
-            token <- get_token(user, pass)
+            token <- get_token()
             response <- send_message_with_token(message, token.get) if (token.isDefined)
         } yield response
     }
